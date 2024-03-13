@@ -26,9 +26,9 @@ class GoogleMapsScraper:
     def _selenium_extractor(self):
         action = ActionChains(self.browser)
         prev_length = 0
-        print("\nScraping has started. We'll let you know when we're done. This could take a few minutes. Please do not close the browser window or minimize it (the script will stop if you do so).")
+        print("\nScraping has started. We'll let you know when we're done. This could take a few minutes. Please do not close the browser window or click the top and move it (the script will stop if you do so). Minimizing will not stop the script, but it will interfere with extraction of information (it will start duplicating the last entry).")
 
-        while len(self._get_elements()) < 1000: # This is the number of results per page. Google seemingly has a hard limit of 120, but 1000 ensures that it runs smoothly.
+        while len(self._get_elements()) < 1000: # This limits the number of results per page. Google seemingly has a hard limit of 120, but 1000 ensures that it runs smoothly.
             # Acquiring elements to scrape
             print(len(self._get_elements()))
             var = len(self._get_elements())
@@ -47,6 +47,9 @@ class GoogleMapsScraper:
                 prev_length = len(a)
             except StaleElementReferenceException:
                 continue
+        
+        phone_pattern = re.compile(r'^(\+[\d\s()-]*|\d+[\d\s()-]*)$')
+        website_pattern = re.compile(r'\b(?:https?://)?(?:www\.)?\S+\.\S+\b')
 
         for element in self._get_elements():
             self.browser.execute_script("arguments[0].scrollIntoView();", element)
@@ -59,43 +62,51 @@ class GoogleMapsScraper:
                 name_html = soup.find('h1', {"class": "DUwDvf lfPIob"})
                 name = name_html.text.strip()
                 info_divs = soup.findAll('div', {"class": "Io6YTe fontBodyMedium kR99db"}) # Represent the element that holds the other information
-                phone = "Not available"
+                phone = ""
                 for j in range(len(info_divs)):
-                    if re.match(r'^(\+[\d\s()-]*|\d+[\d\s()-]*)$', info_divs[j].text.strip()): # Check if the phone number is in the format of a phone number
+                    if phone_pattern.match(info_divs[j].text.strip()): # Check if the phone number is in the format of a phone number
                         phone = info_divs[j].text
                 # Address is extracted from a field in the same div as the phone number
                 address_html = info_divs[0].text
-                address = address_html
+                # Checks to ensure that it's not a rare case that a Google Maps result doesn't have an address
+                if not phone_pattern.match(address_html) and not website_pattern.match(address_html):
+                    address = address_html
+                else:
+                    address = ""
                 website_html = soup.find('a', {"class": "CsEnBe", "data-item-id": "authority"}) # Find element with 'href' attribute (more reliable and includes 'https://' part of addresses)
                 if website_html:
                     website = website_html.get('href')
                 else:
-                    website = "Not available"
-                    
-                emails = "Not available" # Reset emails variable before attempting to extract from the current website
-                # Check gathered websites for email addresses
-                for j in range(len(info_divs)):
-                    if website_html:
-                        try:
-                            website_source = requests.get(website, timeout=10).text
-                            emails = re.findall(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', website_source) # Checks if the email address is in a correct format
-                            emails = [email for email in emails if not email.endswith('.wixpress.com')] # Removes results with '.wixpress.com' domain
-                            emails = list(set(emails)) #Stores email addresses (there can be multiple for each result)
-                            if not emails:
-                                emails = "Not available"
-                        # Various issues could happen during attempted extraction of email addresses
-                        except (Timeout, ConnectionError) as ex:
-                            print("Error scraping emails from website due to network issues:", ex)
-                        except HTTPError as ex:
-                            print("HTTP error occurred while accessing the website:", ex)
-                        except RequestException as ex:
-                            print("An error occurred while accessing the website:", ex)
-                    # If no website, there are certainly no email addresses
-                    else:
-                        website = "Not available"
-                        emails = "Not available"
-                print([name, phone, address, website, emails]) # Preview of information from each result to go into CSV
-                self.csv_data.append([name, phone, address, website, emails]) # Appending for printing to CSV
+                    website = ""
+
+                email_pattern = re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b')
+                email_excluded_substrings = ['2x.png', 'sentry.io', '.wixpress.com']
+                # Checks for 'phone' or 'website'. If neither, exclude the result.    
+                if phone or website:    
+                    emails = "" # Reset emails variable before attempting to extract from the current website
+                    # Check gathered websites for email addresses
+                    for j in range(len(info_divs)):
+                        if website_html:
+                            try:
+                                website_source = requests.get(website, timeout=10).text
+                                emails = re.findall(email_pattern, website_source) # Checks if the email address is in a correct format
+                                emails = [email for email in emails if not any(substring in email for substring in email_excluded_substrings)] # Removes invalid results from emails
+                                emails = list(set(emails)) #Stores email addresses (there can be multiple for each result)
+                                if not emails:
+                                    emails = ""
+                            # Various issues could happen during attempted extraction of email addresses
+                            except (Timeout, ConnectionError) as ex:
+                                print("Error scraping emails from website due to network issues:", ex)
+                            except HTTPError as ex:
+                                print("HTTP error occurred while accessing the website:", ex)
+                            except RequestException as ex:
+                                print("An error occurred while accessing the website:", ex)
+                        # If no website, there are certainly no email addresses
+                        else:
+                            website = ""
+                            emails = ""
+                    print([name, phone, website, emails, address]) # Preview of information from each result to go into CSV
+                    self.csv_data.append([name, phone, website, emails, address]) # Appending for printing to CSV
             except Exception as ex:
                 print("Error occurred:", ex)
                 continue
@@ -108,7 +119,7 @@ class GoogleMapsScraper:
 
     def _save_to_csv(self):
         print("\nData scraped. Making CSV file...")
-        df = pd.DataFrame(self.csv_data, columns=['Business Name', 'Phone', 'Street Address', 'Website', 'Email Addresses'])
+        df = pd.DataFrame(self.csv_data, columns=['Business Name', 'Phone', 'Website', 'Email Addresses', 'Street Address'])
         df.to_csv(filename + '.csv', index=False, encoding='utf-8')
         print("\nCSV file made successfully. Check the directory of this app's location for your resulting file. Remember to not give files names which are already in use within the same directory as the .exe (they will overwrite).\n\nNOTE: There may be some useless information in 'Email Addresses' column, as some other pieces of information may be scanned as email addresses in addition to the actual email addresses.\n")
 
