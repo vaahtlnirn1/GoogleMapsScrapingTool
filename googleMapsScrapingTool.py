@@ -6,8 +6,9 @@ import re
 import requests
 from requests.exceptions import RequestException, Timeout, HTTPError, ConnectionError
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, ElementClickInterceptedException
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 class GoogleMapsScraper:
     def __init__(self, link):
@@ -20,14 +21,17 @@ class GoogleMapsScraper:
 
     def scrape(self):
         self.browser.get(str(self.link))
-        time.sleep(10) # This is a time delay to allow time for the user to accept or deny Google's terms.
+        try:
+            WebDriverWait(self.browser, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".VfPpkd-LgbsSe.VfPpkd-LgbsSe-OWXEXe-k8QpJ.VfPpkd-LgbsSe-OWXEXe-dgl2Hf.nCP5yc.AjY5Oe.DuMIQc.LQeN7.XWZjwc")))
+            accept_button = self.browser.find_element(By.CSS_SELECTOR, ".VfPpkd-LgbsSe.VfPpkd-LgbsSe-OWXEXe-k8QpJ.VfPpkd-LgbsSe-OWXEXe-dgl2Hf.nCP5yc.AjY5Oe.DuMIQc.LQeN7.XWZjwc")
+            accept_button.click()  # Click the accept button for Google cookies and terms
+        except Exception as e:
+            print("Error accepting cookies:", e)
         self._selenium_extractor()
 
     def _selenium_extractor(self):
-        action = ActionChains(self.browser)
         prev_length = 0
         print("\nScraping has started. We'll let you know when we're done. This could take a few minutes. Please do not close the browser window or click the top and move it (the script will stop if you do so). Minimizing will not stop the script, but it will interfere with extraction of information (it will start duplicating the last entry).")
-
         while len(self._get_elements()) < 1000: # This limits the number of results per page. Google seemingly has a hard limit of 120, but 1000 ensures that it runs smoothly.
             # Acquiring elements to scrape
             print(len(self._get_elements()))
@@ -47,13 +51,19 @@ class GoogleMapsScraper:
                 prev_length = len(a)
             except StaleElementReferenceException:
                 continue
-        
-        phone_pattern = re.compile(r'^(\+[\d\s()-]*|\d+[\d\s()-]*)$')
-        website_pattern = re.compile(r'\b(?:https?://)?(?:www\.)?\S+\.\S+\b')
 
         for element in self._get_elements():
-            self.browser.execute_script("arguments[0].scrollIntoView();", element)
-            element.click() # Clicks each element to prepare for extracting of information
+            try:
+                # Scroll element into view
+                self.browser.execute_script("arguments[0].scrollIntoView();", element)
+                element.click()
+            except ElementClickInterceptedException:
+                # Attempt to click the element using JavaScript as a fallback
+                try:
+                    self.browser.execute_script("arguments[0].click();", element)
+                except Exception as e:
+                    print(f"JavaScript click failed: {e}")
+                    continue  # Skip to the next element if both attempts fail
             time.sleep(2)
             source = self.browser.page_source
             soup = BeautifulSoup(source, 'html.parser')
@@ -61,19 +71,23 @@ class GoogleMapsScraper:
                 # Retrieve the names
                 name_html = soup.find('h1', {"class": "DUwDvf lfPIob"})
                 name = name_html.text.strip()
-                info_divs = soup.findAll('div', {"class": "Io6YTe fontBodyMedium kR99db"}) # Represent the element that holds the other information
-                phone = ""
+                info_divs = soup.findAll('div', {"class": "m6QErb XiKgde"}) # Represents the element that holds all other information
                 for j in range(len(info_divs)):
-                    if phone_pattern.match(info_divs[j].text.strip()): # Check if the phone number is in the format of a phone number
-                        phone = info_divs[j].text
-                # Address is extracted from a field in the same div as the phone number
-                address_html = info_divs[0].text
-                # Checks to ensure that it's not a rare case that a Google Maps result doesn't have an address
-                if not phone_pattern.match(address_html) and not website_pattern.match(address_html):
-                    address = address_html
+                    phone_field_html = soup.find(attrs={"data-item-id": lambda x: x and x.startswith("phone:tel:")})
+                    if phone_field_html:
+                        phone_html = phone_field_html.find('div', {"class": "Io6YTe fontBodyMedium kR99db fdkmkc"})
+                        phone = phone_html.text.strip()
+                    else:
+                        phone = ""
+                # Necessary due to Google's page layout with the address
+                address_field_html = soup.find('button', {"class": "CsEnBe", "data-item-id": "address"})
+                # Checks to ensure that it's not a rare case that a Google Maps result doesn't have an address (weird, I know..)
+                if address_field_html:
+                    address_html = address_field_html.find('div', {"class": "Io6YTe fontBodyMedium kR99db fdkmkc"})
+                    address = address_html.text.strip()
                 else:
                     address = ""
-                website_html = soup.find('a', {"class": "CsEnBe", "data-item-id": "authority"}) # Find element with 'href' attribute (more reliable and includes 'https://' part of addresses)
+                website_html = soup.find('a', {"class": "CsEnBe", "data-item-id": "authority"}) # Find element with 'href' attribute
                 if website_html:
                     website = website_html.get('href')
                 else:
@@ -118,10 +132,14 @@ class GoogleMapsScraper:
         return self.browser.find_elements(By.CLASS_NAME, "hfpxzc") # Represents each Google Maps result on the left sidebar
 
     def _save_to_csv(self):
-        print("\nData scraped. Making CSV file...")
-        df = pd.DataFrame(self.csv_data, columns=['Business Name', 'Phone', 'Website', 'Email Addresses', 'Street Address'])
-        df.to_csv(filename + '.csv', index=False, encoding='utf-8')
-        print("\nCSV file made successfully. Check the directory of this app's location for your resulting file. Remember to not give files names which are already in use within the same directory as the .exe (they will overwrite).\n\nNOTE: There may be some useless information in 'Email Addresses' column, as some other pieces of information may be scanned as email addresses in addition to the actual email addresses.\n")
+        try:
+            print("\nData scraped. Making CSV file...")
+            df = pd.DataFrame(self.csv_data, columns=['Business Name', 'Phone', 'Website', 'Email Addresses', 'Street Address'])
+            print(f"Saving to filename: {filename}.csv")
+            df.to_csv(filename + '.csv', index=False, encoding='utf-8')
+            print("\nCSV file made successfully. Check the directory of this app's location for your resulting file.")
+        except Exception as e:
+            print(f"Failed to save CSV file. Error: {e}")
 
 if __name__ == "__main__":
     filename = input("\nPlease enter a file name (a name which is unique to the directory of this program) for the resulting CSV file: ")
